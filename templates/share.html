@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Share location — PhoneTracer</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Inter', sans-serif;
+            background: #0a0e1a;
+            color: #f1f5f9;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+        }
+        .card {
+            max-width: 420px;
+            width: 100%;
+            background: #1a1f35;
+            border: 1px solid #1e293b;
+            border-radius: 16px;
+            padding: 28px;
+        }
+        h1 { font-size: 20px; margin-bottom: 12px; }
+        p { color: #94a3b8; font-size: 14px; line-height: 1.6; margin-bottom: 20px; }
+        button {
+            width: 100%;
+            padding: 16px;
+            border: none;
+            border-radius: 12px;
+            font-size: 16px;
+            font-weight: 600;
+            font-family: inherit;
+            cursor: pointer;
+            background: linear-gradient(135deg, #10b981, #059669);
+            color: white;
+        }
+        button:disabled { opacity: 0.6; cursor: not-allowed; }
+        .ok { margin-top: 16px; padding: 14px; border-radius: 12px; background: rgba(16,185,129,0.15); border: 1px solid rgba(16,185,129,0.3); color: #10b981; font-size: 14px; display: none; }
+        .ok.show { display: block; }
+        .err { margin-top: 12px; color: #ef4444; font-size: 13px; display: none; }
+        .err.show { display: block; }
+        .hint { font-size: 12px; color: #64748b; margin-top: 12px; text-align: center; display: none; }
+        .hint.show { display: block; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>Share this phone’s location</h1>
+        <p>Someone asked to see where <strong>this device</strong> is on a map. Tap the button only if you agree. We sample GPS for a few seconds and send the <strong>most accurate</strong> fix (outdoors / Wi‑Fi helps).</p>
+        <p style="font-size: 12px; color: #64748b;">Browsers need <strong>HTTPS</strong> for GPS on the public internet — use <code style="background:#0a0e1a;padding:2px 6px;border-radius:4px;">localhost</code> or HTTPS in production.</p>
+        <button type="button" id="btn">Allow &amp; send best location</button>
+        <div class="hint" id="hint">Refining GPS… stay still or move near a window for ~6 seconds.</div>
+        <div class="err" id="err"></div>
+        <div class="ok" id="ok">Location sent. You can close this page.</div>
+    </div>
+    <script>
+        const token = {{ token|tojson }};
+        const btn = document.getElementById('btn');
+        const err = document.getElementById('err');
+        const ok = document.getElementById('ok');
+        const hint = document.getElementById('hint');
+
+        function showErr(msg) {
+            err.textContent = msg;
+            err.classList.add('show');
+        }
+
+        function sendBest(best) {
+            return fetch('/api/share/' + encodeURIComponent(token) + '/report', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    latitude: best.lat,
+                    longitude: best.lng,
+                    accuracy: best.accuracy,
+                }),
+            });
+        }
+
+        btn.addEventListener('click', () => {
+            err.classList.remove('show');
+            if (!navigator.geolocation) {
+                showErr('Geolocation is not supported on this browser.');
+                return;
+            }
+            btn.disabled = true;
+            btn.textContent = 'Getting best GPS fix…';
+            hint.classList.add('show');
+
+            let best = null;
+            let watchId = null;
+            const consider = (pos) => {
+                const acc = pos.coords.accuracy;
+                const lat = pos.coords.latitude;
+                const lng = pos.coords.longitude;
+                if (!best || acc < best.accuracy) {
+                    best = { lat, lng, accuracy: acc };
+                }
+            };
+
+            const finish = async () => {
+                if (watchId != null) navigator.geolocation.clearWatch(watchId);
+                watchId = null;
+                hint.classList.remove('show');
+                if (!best) {
+                    navigator.geolocation.getCurrentPosition(
+                        async (pos) => {
+                            const fix = {
+                                lat: pos.coords.latitude,
+                                lng: pos.coords.longitude,
+                                accuracy: pos.coords.accuracy,
+                            };
+                            await submit(fix);
+                        },
+                        (e) => {
+                            btn.disabled = false;
+                            btn.textContent = 'Allow & send best location';
+                            if (e.code === 1) showErr('Permission denied. Enable location in browser settings.');
+                            else if (e.code === 2) showErr('Position unavailable.');
+                            else showErr('Request timed out.');
+                        },
+                        { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+                    );
+                    return;
+                }
+                await submit(best);
+            };
+
+            async function submit(fix) {
+                try {
+                    const r = await sendBest(fix);
+                    const j = await r.json();
+                    if (!r.ok) {
+                        showErr(j.error || 'Failed to send.');
+                        btn.disabled = false;
+                        btn.textContent = 'Allow & send best location';
+                        return;
+                    }
+                    ok.classList.add('show');
+                    btn.textContent = 'Sent';
+                } catch (e) {
+                    showErr('Network error.');
+                    btn.disabled = false;
+                    btn.textContent = 'Allow & send best location';
+                }
+            }
+
+            watchId = navigator.geolocation.watchPosition(
+                consider,
+                (e) => {
+                    if (watchId != null) navigator.geolocation.clearWatch(watchId);
+                    hint.classList.remove('show');
+                    btn.disabled = false;
+                    btn.textContent = 'Allow & send best location';
+                    if (e.code === 1) showErr('Permission denied. Enable location in browser settings.');
+                    else if (e.code === 2) showErr('Position unavailable.');
+                    else showErr('Could not read GPS.');
+                },
+                { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 }
+            );
+
+            setTimeout(finish, 6500);
+        });
+    </script>
+</body>
+</html>
